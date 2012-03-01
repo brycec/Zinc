@@ -2,6 +2,8 @@ from tests import *
 #from zinc import ZincCatalog, create_catalog_at_path, ZINC_FORMAT
 from zinc import *
 import os.path
+from mock import Mock
+from zinc.backends import *
 
 class ZincCatalogTestCase(TempDirTestCase):
 
@@ -176,7 +178,19 @@ class ZincIndexTestCase(TempDirTestCase):
 class ZincManifestTestCase(TempDirTestCase):
 
     def test_save_and_load(self):
-        manifest1 = ZincManifest("meep", 1)
+        backend = FileSystemBackend(self.dir)
+
+        #catalog = Mock()
+        #catalog.backend.return_value = backend
+
+        # cant get dumb mock to work
+        class MockCatalog(object):
+            def __init__(self, backend):
+                self.backend = backend
+
+        catalog = MockCatalog(backend)
+
+        manifest1 = ZincManifest("meep", 1, catalog)
         manifest1.files = {
                 'a': {
                     'sha': 'ea502a7bbd407872e50b9328956277d0228272d4',
@@ -187,8 +201,7 @@ class ZincManifestTestCase(TempDirTestCase):
                         }
                     }
                 }
-        path = os.path.join(self.dir, "manifest.json")
-        manifest1.write(path)
-        manifest2 = load_manifest(path)
+        manifest1.write("manifest.json")
+        manifest2 = load_manifest(catalog, os.path.join(self.dir, "manifest.json"))
         assert manifest1.equals(manifest2)
 

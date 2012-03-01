@@ -5,9 +5,13 @@ import json
 from shutil import copyfile
 from os.path import join as pjoin
 import tarfile
+import io
 
 import errno
+
+from backends import Backend, FileSystemBackend
 from utils import sha1_for_path, canonical_path, makedirs, mygzip
+
 ZINC_FORMAT = "1"
 ZINC_REPO_INDEX = "index.json"
 ZINC_REPO_CONFIG = "config.json"
@@ -41,13 +45,41 @@ class ZincOperation(object):
 
 ### ZincIndex ################################################################
 
-class ZincIndex(object):
+class ZincJSONObject(object):
 
-    def __init__(self, id=None):
+    def __init__(self, catalog=None):
+        self.catalog = catalog
+
+    def write(self, path, gzip=False):
+
+        # TODO: ensure catalog (and backend) are set
+
+        dict = self.to_json()
+        
+        #fp = io.BytesIO()
+        ##json.dumps(dict, fp)
+        ##self.catalog.backend.write_path_from_stream(path, fp)
+        #fp.close()
+        
+        self.catalog.backend.write_path_from_string(path, json.dumps(dict))
+
+        #file = open(path, 'w')
+        #dict = self.to_json()
+        #file.write(json.dumps(dict))
+        #file.close()
+        #if gzip:
+        #    gzpath = path + '.gz'
+        #    mygzip(path, gzpath)
+
+
+class ZincIndex(ZincJSONObject):
+
+    def __init__(self, catalog=None, id=None):
+        ZincJSONObject.__init__(self, catalog)
+        self.id = id
         self.format = ZINC_FORMAT
         self._bundles = {}
         self.distributions = {}
-        self.id = id
 
     def get_bundles(self):
         return self._bundles
@@ -75,13 +107,7 @@ class ZincIndex(object):
     def write(self, path, gzip=False):
         if self.id is None:
             raise ValueError("catalog id is None") # TODO: better exception?
-        index_file = open(path, 'w')
-        dict = self.to_json()
-        index_file.write(json.dumps(dict))
-        index_file.close()
-        if gzip:
-            gzpath = path + '.gz'
-            mygzip(path, gzpath)
+        super(ZincIndex, self).write(path, gzip)
 
     def add_version_for_bundle(self, bundle_name, version):
         versions = self._bundles.get(bundle_name) or []
@@ -120,9 +146,10 @@ def load_index(path):
 
 ### ZincConfig ###############################################################
 
-class ZincConfig(object):
+class ZincConfig(ZincJSONObject):
 
-    def __init__(self):
+    def __init__(self, catalog=None):
+        ZincJSONObject.__init__(self, catalog)
         self.gzip_threshhold = 0.85
 
     def to_json(self):
@@ -131,11 +158,8 @@ class ZincConfig(object):
             d['gzip_threshhold'] = self.gzip_threshhold
         return d
    
-    def write(self, path):
-        config_file = open(path, 'w')
-        dict = self.to_json()
-        config_file.write(json.dumps(dict))
-        config_file.close()
+    def write(self, path, gzip=False):
+        super(ZincConfig, self).write(path, gzip)
 
 def load_config(path):
     config_file = open(path, 'r')
@@ -148,7 +172,7 @@ def load_config(path):
 
 ### ZincManifest #############################################################
 
-class ZincManifest(object):
+class ZincManifest(ZincJSONObject):
 
     def __init__(self, bundle_name, version=1, catalog=None):
         self.bundle_name = bundle_name
@@ -173,13 +197,7 @@ class ZincManifest(object):
                 }
 
     def write(self, path, gzip=False):
-        manifest_file = open(path, 'w')
-        dict = self.to_json()
-        manifest_file.write(json.dumps(dict))
-        manifest_file.close()
-        if gzip:
-            gzpath = path + '.gz'
-            mygzip(path, gzpath)
+        super(ZincManifest, self).write(path, gzip)
 
     def files_are_equivalent(self, other):
         # check that the keys are all the same
@@ -200,13 +218,13 @@ class ZincManifest(object):
                 and self.bundle_name == other.bundle_name \
                 and self.files_are_equivalent(other)
 
-def load_manifest(path):
+def load_manifest(catalog, path):
     manifest_file = open(path, 'r')
     dict = json.load(manifest_file)
     manifest_file.close()
     bundle_name = dict['bundle']
     version = int(dict['version'])
-    manifest = ZincManifest(bundle_name, version)
+    manifest = ZincManifest(bundle_name, version, catalog=catalog)
     manifest.files = dict['files']
     return manifest
 
@@ -229,7 +247,7 @@ class CreateBundleVersionOperation(ZincOperation):
         version = self._next_version_for_bundle(self.bundle_name)
 
         # Create a new manifest outside of the catalog
-        new_manifest = ZincManifest(self.bundle_name, version)
+        new_manifest = ZincManifest(self.bundle_name, version, catalog=self)
 
         # Process all the paths and add them to the manifest
         for root, dirs, files in os.walk(self.src_dir):
@@ -293,15 +311,17 @@ def create_catalog_at_path(path, id):
         else:
             raise e
 
+    catalog = ZincCatalog(path)
+
     config_path = pjoin(path, ZINC_REPO_CONFIG)
-    ZincConfig().write(config_path)
+    ZincConfig(catalog=catalog).write(config_path)
 
     index_path = pjoin(path, ZINC_REPO_INDEX)
-    ZincIndex(id).write(index_path, True)
+    ZincIndex(catalog=catalog, id=id).write(index_path, True)
 
     # TODO: check exceptions?
 
-    return ZincCatalog(path)
+    return catalog
 
 class ZincCatalog(object):
 
@@ -314,6 +334,7 @@ class ZincCatalog(object):
     def __init__(self, path):
         self._loaded = False
         self.path = canonical_path(path)
+        self.backend = FileSystemBackend(self.path)
         self._manifests = {}
         self._load()
 
@@ -346,10 +367,12 @@ class ZincCatalog(object):
         self.index = load_index(index_path)
         if self.index.format != ZINC_FORMAT:
             raise Exception("Incompatible format %s" % (self.index.format))
+        self.index.catalog = self
 
     def _read_config_file(self):
         config_path = pjoin(self.path, ZINC_REPO_CONFIG)
         self.config = load_config(config_path)
+        self.config.catalog = self
 
     def _write_index_file(self):
         index_path = pjoin(self.path, ZINC_REPO_INDEX)
@@ -376,7 +399,7 @@ class ZincCatalog(object):
         elif version not in all_versions:
             return None # throw exception?
         manifest_path = self._path_for_manifest_for_bundle_version(bundle_name, version)
-        return load_manifest(manifest_path)
+        return load_manifest(catalog, manifest_path)
 
     def _write_manifest(self, manifest):
         manifest.write(self._path_for_manifest(manifest), True)
